@@ -7,7 +7,13 @@ interface SummaryCardsProps {
   stats: SummaryStats;
 }
 
-function TrendBadge({ trend, label }: { trend: "up" | "down" | "stable"; label: string }) {
+function TrendBadge({
+  trend,
+  label,
+}: {
+  trend: "up" | "down" | "stable";
+  label: string;
+}) {
   const config = {
     up: {
       bg: "bg-emerald-50 dark:bg-emerald-950/40",
@@ -51,7 +57,7 @@ function TrendBadge({ trend, label }: { trend: "up" | "down" | "stable"; label: 
 
 interface StatCardProps {
   title: string;
-  value: number;
+  value: number | null;
   unit: string;
   period: string;
   trend: "up" | "down" | "stable";
@@ -61,6 +67,7 @@ interface StatCardProps {
   description: string;
   trendLabel: string;
   index: number;
+  precision?: number;
 }
 
 function StatCard({
@@ -75,12 +82,19 @@ function StatCard({
   description,
   trendLabel,
   index,
+  precision = 1,
 }: StatCardProps) {
+  const isAvailable = value !== null && Number.isFinite(value);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.4, delay: index * 0.08, ease: "easeOut" }}
+      transition={{
+        duration: 0.4,
+        delay: index * 0.08,
+        ease: "easeOut",
+      }}
       className="stat-card glass-card rounded-2xl p-5 relative overflow-hidden group"
     >
       {/* Subtle gradient accent in corner */}
@@ -98,23 +112,29 @@ function StatCard({
             >
               {icon}
             </div>
+
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wider">
               {title}
             </span>
           </div>
+
           <TrendBadge trend={trend} label={trendLabel} />
         </div>
 
         {/* Value */}
         <div className="flex items-baseline gap-1.5 mb-1.5">
           <span className="text-3xl font-bold text-slate-900 dark:text-white tabular-nums tracking-tight animate-count">
-            {value.toFixed(1)}
+            {isAvailable ? value.toFixed(precision) : "N/A"}
           </span>
-          <span className="text-base font-medium text-slate-400 dark:text-slate-500">{unit}</span>
+
+          {isAvailable && (
+            <span className="text-base font-medium text-slate-400 dark:text-slate-500">{unit}</span>
+          )}
         </div>
 
         {/* Period and description */}
         <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">{period}</p>
+
         <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-0.5">{description}</p>
       </div>
     </motion.div>
@@ -220,6 +240,7 @@ export function SummaryCards({ stats }: SummaryCardsProps) {
         }
         index={0}
       />
+
       <StatCard
         title="CPI Inflation"
         value={stats.cpiInflation.value}
@@ -239,6 +260,7 @@ export function SummaryCards({ stats }: SummaryCardsProps) {
         }
         index={1}
       />
+
       <StatCard
         title="WPI Inflation"
         value={stats.wpiInflation.value}
@@ -248,7 +270,11 @@ export function SummaryCards({ stats }: SummaryCardsProps) {
         icon={<WPIIcon />}
         accentFrom="from-blue-500"
         accentTo="to-blue-600"
-        description="Wholesale price index inflation"
+        description={
+          stats.wpiInflation.value === null
+            ? "Unavailable without a prior-year match"
+            : "Year-on-year change in the wholesale price index"
+        }
         trendLabel={
           stats.wpiInflation.trend === "up"
             ? "Rising"
@@ -257,7 +283,9 @@ export function SummaryCards({ stats }: SummaryCardsProps) {
               : "Steady"
         }
         index={2}
+        precision={2}
       />
+
       <StatCard
         title="IIP Growth"
         value={stats.iipGrowth.value}

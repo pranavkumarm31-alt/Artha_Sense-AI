@@ -8,7 +8,6 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
-  Legend,
   Line,
   LineChart,
   ReferenceLine,
@@ -26,12 +25,9 @@ export function CPIChart({ data }: CPIChartProps) {
   const { grid, axis, tick, tooltipStyle } = useChartTheme();
 
   const chartData = data.map((d) => ({
-    period: `${d.month}`,
+    period: d.period,
     inflation: d.inflationRate,
     general: d.cpiGeneral,
-    food: d.cpiFood,
-    fuel: d.cpiFuel,
-    housing: d.cpiHousing,
   }));
 
   return (
@@ -62,7 +58,7 @@ export function CPIChart({ data }: CPIChartProps) {
             <div>
               <CardTitle>Consumer Price Index (CPI)</CardTitle>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Monthly inflation rate with RBI target band (Base: 2012=100)
+                Monthly CPI index and inflation; CPI index base: 2024=100
               </p>
             </div>
           </div>
@@ -103,12 +99,14 @@ export function CPIChart({ data }: CPIChartProps) {
                   tickLine={false}
                   axisLine={false}
                   unit="%"
-                  domain={[0, 8]}
+                  domain={["auto", "auto"]}
                   width={45}
                 />
                 <Tooltip
                   contentStyle={tooltipStyle}
-                  formatter={(value: number) => [`${value.toFixed(2)}%`]}
+                  formatter={(value) => [
+                    typeof value === "number" ? `${value.toFixed(2)}%` : "N/A",
+                  ]}
                 />
                 {/* RBI Target Band */}
                 <ReferenceLine
@@ -141,7 +139,7 @@ export function CPIChart({ data }: CPIChartProps) {
 
           <div className="mt-8 pt-6 border-t border-slate-200/60 dark:border-slate-700/30">
             <h4 className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-3 uppercase tracking-wider">
-              CPI by Category
+              CPI General Index
             </h4>
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
@@ -168,42 +166,13 @@ export function CPIChart({ data }: CPIChartProps) {
                   />
                   <Tooltip
                     contentStyle={tooltipStyle}
-                    formatter={(value: number) => [value.toFixed(1)]}
-                  />
-                  <Legend
-                    iconType="circle"
-                    iconSize={8}
-                    wrapperStyle={{ fontSize: "11px", paddingTop: "12px" }}
+                    formatter={(value) => [typeof value === "number" ? value.toFixed(1) : "N/A"]}
                   />
                   <Line
                     type="monotone"
                     dataKey="general"
                     name="General"
                     stroke="#6366f1"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="food"
-                    name="Food"
-                    stroke="#ef4444"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="fuel"
-                    name="Fuel"
-                    stroke="#f59e0b"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="housing"
-                    name="Housing"
-                    stroke="#8b5cf6"
                     strokeWidth={2}
                     dot={false}
                   />

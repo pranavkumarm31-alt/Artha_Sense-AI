@@ -1,12 +1,28 @@
 "use client";
 
+import type { DatasetStatus } from "@/lib/types";
 import { useTheme } from "./theme-provider";
 
-type TabId = "overview" | "gdp" | "cpi" | "wpi" | "iip";
+type TabId =
+  | "overview"
+  | "gdp"
+  | "cpi"
+  | "wpi"
+  | "iip"
+  | "forecasts"
+  | "analysis"
+  | "anomalies"
+  | "research";
 
 interface HeaderProps {
   activeTab: TabId;
   onTabChange: (tab: TabId) => void;
+  status: DatasetStatus;
+  lastSuccessfulFetch: string | null;
+  refreshing: boolean;
+  onRefresh: () => void;
+  refreshIntervalMinutes: number;
+  onRefreshIntervalChange: (minutes: number) => void;
 }
 
 const tabs: { id: TabId; label: string; shortLabel: string }[] = [
@@ -15,11 +31,42 @@ const tabs: { id: TabId; label: string; shortLabel: string }[] = [
   { id: "cpi", label: "CPI", shortLabel: "CPI" },
   { id: "wpi", label: "WPI", shortLabel: "WPI" },
   { id: "iip", label: "IIP", shortLabel: "IIP" },
+  { id: "forecasts", label: "AI Forecasts", shortLabel: "Forecasts" },
+  { id: "analysis", label: "Economic Analysis", shortLabel: "Analysis" },
+  { id: "anomalies", label: "Anomaly Detection", shortLabel: "Anomalies" },
+  { id: "research", label: "Research Assistant", shortLabel: "Research" },
 ];
 
 export type { TabId };
 
-export function Header({ activeTab, onTabChange }: HeaderProps) {
+const statusStyles: Record<DatasetStatus, string> = {
+  LIVE: "bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200/60 dark:border-emerald-800/40 text-emerald-700 dark:text-emerald-400",
+  UPDATING:
+    "bg-blue-50 dark:bg-blue-950/40 border-blue-200/60 dark:border-blue-800/40 text-blue-700 dark:text-blue-400",
+  STALE:
+    "bg-amber-50 dark:bg-amber-950/40 border-amber-200/60 dark:border-amber-800/40 text-amber-700 dark:text-amber-400",
+  OFFLINE:
+    "bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300",
+};
+
+function formatFetchTime(value: string | null): string {
+  if (!value) return "No successful fetch yet";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Last successful fetch unavailable"
+    : `Last successful fetch ${date.toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}`;
+}
+
+export function Header({
+  activeTab,
+  onTabChange,
+  status,
+  lastSuccessfulFetch,
+  refreshing,
+  onRefresh,
+  refreshIntervalMinutes,
+  onRefreshIntervalChange,
+}: HeaderProps) {
   const { theme, toggleTheme, mounted } = useTheme();
 
   return (
@@ -91,16 +138,62 @@ export function Header({ activeTab, onTabChange }: HeaderProps) {
               eSankhyiki
             </a>
 
-            {/* Live indicator */}
-            <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200/60 dark:border-emerald-800/40">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+            <div className="flex flex-col items-end leading-tight" aria-live="polite">
+              <span
+                title="LIVE means the latest available official release was fetched successfully; observations are published periodically."
+                className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full border text-[11px] font-semibold ${statusStyles[status]}`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    status === "LIVE"
+                      ? "bg-emerald-500"
+                      : status === "UPDATING"
+                        ? "bg-blue-500 animate-pulse"
+                        : status === "STALE"
+                          ? "bg-amber-500"
+                          : "bg-slate-400"
+                  }`}
+                />
+                {status}
               </span>
-              <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
-                Live
+              <span className="mt-1 hidden text-[9px] text-slate-500 dark:text-slate-400 sm:inline">
+                {status === "STALE"
+                  ? "Showing cached official observations"
+                  : status === "UPDATING"
+                    ? "Refreshing official observations"
+                    : status === "OFFLINE"
+                      ? "MoSPI unavailable"
+                      : "Latest official MoSPI releases"}
+              </span>
+              <span className="hidden text-[9px] text-slate-400 dark:text-slate-500 md:block">
+                {formatFetchTime(lastSuccessfulFetch)}
               </span>
             </div>
+
+            <label className="hidden lg:flex items-center gap-1 text-[10px] text-slate-500 dark:text-slate-400">
+              Auto
+              <select
+                value={refreshIntervalMinutes}
+                onChange={(event) => onRefreshIntervalChange(Number(event.target.value))}
+                className="rounded-md border border-slate-200 bg-white px-1.5 py-1 text-[10px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                aria-label="Automatic refresh interval"
+              >
+                <option value={15}>15 min</option>
+                <option value={60}>1 hour</option>
+                <option value={360}>6 hours</option>
+              </select>
+            </label>
+
+            <button
+              type="button"
+              onClick={onRefresh}
+              disabled={refreshing}
+              className="rounded-lg border border-slate-200/70 bg-white/70 px-2.5 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700/60 dark:bg-slate-900/70 dark:text-slate-300 dark:hover:bg-slate-800"
+              aria-label="Refresh official data"
+              title="Fetch the latest available official observations from MoSPI"
+            >
+              {refreshing ? "Updating..." : "Refresh"}
+            </button>
 
             {/* Theme toggle */}
             <button

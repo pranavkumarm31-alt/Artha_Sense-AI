@@ -1,3 +1,12 @@
+export type CacheStatus = "live" | "stale";
+
+export interface CacheResult<T> {
+  data: T;
+  status: CacheStatus;
+  lastSuccessfulFetch: string;
+  warning?: string;
+}
+
 interface CacheEntry<T> {
   data: T;
   timestamp: number;
@@ -13,6 +22,7 @@ interface CacheState {
 const globalCache = globalThis as typeof globalThis & {
   __indiaEconomicDashboardCache?: CacheState;
 };
+
 function getCacheState(): CacheState {
   const existing = globalCache.__indiaEconomicDashboardCache;
   if (existing) {
@@ -30,35 +40,70 @@ function getCacheState(): CacheState {
 }
 
 const cacheState = getCacheState();
+const DEFAULT_TTL = Number(process.env.MOSPI_CACHE_TTL_MS ?? 6 * 60 * 60 * 1000);
 
-const DEFAULT_TTL = 6 * 60 * 60 * 1000; // 6 hours - data updates monthly/quarterly
+if (!Number.isFinite(DEFAULT_TTL) || DEFAULT_TTL <= 0) {
+  throw new Error("MOSPI_CACHE_TTL_MS must be a positive number of milliseconds.");
+}
+
+function toCacheResult<T>(entry: CacheEntry<T>, status: CacheStatus): CacheResult<T> {
+  return {
+    data: entry.data,
+    status,
+    lastSuccessfulFetch: new Date(entry.timestamp).toISOString(),
+  };
+}
+
+export function getCacheResult<T>(key: string): CacheResult<T> | null {
+  const entry = cacheState.entries.get(key) as CacheEntry<T> | undefined;
+  if (!entry) return null;
+
+  const status = Date.now() - entry.timestamp <= entry.ttl ? "live" : "stale";
+  return toCacheResult(entry, status);
+}
 
 export function getCached<T>(key: string): T | null {
-  const entry = cacheState.entries.get(key);
-  if (!entry) return null;
-  if (Date.now() - entry.timestamp > entry.ttl) {
-    cacheState.entries.delete(key);
-    return null;
-  }
-  return entry.data as T;
+  const result = getCacheResult<T>(key);
+  return result?.status === "live" ? result.data : null;
 }
 
-export function setCache<T>(key: string, data: T, ttl = DEFAULT_TTL): void {
-  cacheState.entries.set(key, { data, timestamp: Date.now(), ttl });
+export function setCache<T>(key: string, data: T, ttl = DEFAULT_TTL): CacheResult<T> {
+  const entry = { data, timestamp: Date.now(), ttl };
+  cacheState.entries.set(key, entry);
+  return toCacheResult(entry, "live");
 }
 
-export function getOrFetchCached<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
-  const cached = getCached<T>(key);
-  if (cached !== null) return Promise.resolve(cached);
+export function getOrFetchCachedResult<T>(
+  key: string,
+  fetcher: () => Promise<T>,
+  options: { force?: boolean } = {}
+): Promise<CacheResult<T>> {
+  const cached = getCacheResult<T>(key);
+  if (!options.force && cached?.status === "live") return Promise.resolve(cached);
 
   const inFlight = cacheState.inFlight.get(key);
-  if (inFlight) return inFlight as Promise<T>;
+  if (inFlight) return inFlight as Promise<CacheResult<T>>;
 
   const request = cacheState.queue
-    .then(fetcher)
-    .then((data) => {
-      setCache(key, data);
-      return data;
+    .then(async () => {
+      if (!options.force) {
+        const latest = getCacheResult<T>(key);
+        if (latest?.status === "live") return latest;
+      }
+
+      try {
+        return setCache(key, await fetcher());
+      } catch (error) {
+        const fallback = getCacheResult<T>(key);
+        if (!fallback) throw error;
+
+        console.warn(`[MoSPI] Refresh failed; serving stale ${key} cache.`, error);
+        return {
+          ...fallback,
+          status: "stale" as const,
+          warning: "Refresh failed; showing the last successful official observations.",
+        };
+      }
     })
     .finally(() => cacheState.inFlight.delete(key));
 
@@ -70,7 +115,11 @@ export function getOrFetchCached<T>(key: string, fetcher: () => Promise<T>): Pro
   return request;
 }
 
+export async function getOrFetchCached<T>(key: string, fetcher: () => Promise<T>): Promise<T> {
+  const result = await getOrFetchCachedResult(key, fetcher);
+  return result.data;
+}
+
 export function clearCache(): void {
   cacheState.entries.clear();
-  cacheState.inFlight.clear();
 }

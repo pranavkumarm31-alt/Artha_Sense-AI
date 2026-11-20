@@ -1,22 +1,14 @@
+import { serveDataset } from "@/lib/api-route";
 import { fetchIIPData } from "@/lib/data-fetchers";
-import { NextResponse } from "next/server";
+import type { IIPDataPoint } from "@/lib/types";
+import type { NextRequest } from "next/server";
 
 export const dynamic = "force-dynamic";
-export const revalidate = 21600; // 6 hours
+export const revalidate = 0;
 
-export async function GET() {
-  try {
-    const data = await fetchIIPData();
-    return NextResponse.json({
-      data,
-      lastUpdated: new Date().toISOString(),
-      source: "MoSPI - Index of Industrial Production",
-    });
-  } catch (error) {
-    console.error("IIP fetch error:", error);
-    return NextResponse.json(
-      { error: "Data temporarily unavailable", data: null },
-      { status: 503 }
-    );
-  }
+export async function GET(request: NextRequest) {
+  return serveDataset<IIPDataPoint[]>(request, "Index of Industrial Production", fetchIIPData, {
+    baseYear: "2011-12",
+    frequency: "Monthly",
+  });
 }

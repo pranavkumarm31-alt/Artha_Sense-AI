@@ -119,7 +119,7 @@ function LoadingMessage() {
           <span className="relative inline-flex rounded-full h-2 w-2 bg-india-saffron" />
         </span>
         <span className="text-sm font-medium text-slate-500 dark:text-slate-400">
-          Loading live data from MoSPI...
+          Fetching latest available official observations from MoSPI...
         </span>
       </div>
     </div>

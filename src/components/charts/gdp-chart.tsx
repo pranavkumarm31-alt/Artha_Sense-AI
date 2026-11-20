@@ -2,6 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useChartTheme } from "@/components/ui/chart-tooltip";
+import { compareFiscalQuarters } from "@/lib/date-utils";
 import type { GDPDataPoint } from "@/lib/types";
 import { motion } from "framer-motion";
 import {
@@ -24,8 +25,8 @@ interface GDPChartProps {
 export function GDPChart({ data }: GDPChartProps) {
   const { grid, axis, tick, tooltipStyle } = useChartTheme();
 
-  const chartData = data.map((d) => ({
-    period: `${d.quarter} ${d.year}`,
+  const chartData = [...data].sort(compareFiscalQuarters).map((d) => ({
+    period: `${d.period}${d.estimateStatus ? ` (${d.estimateStatus})` : ""}`,
     gdpGrowth: d.gdpGrowth,
     agriculture: d.gvaAgriculture,
     industry: d.gvaIndustry,
@@ -84,6 +85,7 @@ export function GDPChart({ data }: GDPChartProps) {
                 />
                 <XAxis
                   dataKey="period"
+                  interval={0}
                   tick={{ fontSize: 11, fill: tick }}
                   tickLine={false}
                   axisLine={{ stroke: axis, strokeWidth: 1 }}
@@ -98,7 +100,9 @@ export function GDPChart({ data }: GDPChartProps) {
                 />
                 <Tooltip
                   contentStyle={tooltipStyle}
-                  formatter={(value: number) => [`${value.toFixed(1)}%`]}
+                  formatter={(value) => [
+                    typeof value === "number" ? `${value.toFixed(1)}%` : "N/A",
+                  ]}
                 />
                 <Legend
                   iconType="circle"
@@ -134,6 +138,7 @@ export function GDPChart({ data }: GDPChartProps) {
                   />
                   <XAxis
                     dataKey="period"
+                    interval={0}
                     tick={{ fontSize: 10, fill: tick }}
                     tickLine={false}
                     axisLine={{ stroke: axis, strokeWidth: 1 }}
@@ -148,7 +153,9 @@ export function GDPChart({ data }: GDPChartProps) {
                   />
                   <Tooltip
                     contentStyle={tooltipStyle}
-                    formatter={(value: number) => [`${value.toFixed(1)}%`]}
+                    formatter={(value) => [
+                      typeof value === "number" ? `${value.toFixed(1)}%` : "N/A",
+                    ]}
                   />
                   <Legend
                     iconType="circle"
