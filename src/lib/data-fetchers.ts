@@ -1,4 +1,4 @@
-import { getCached, setCache } from "./mcp-cache";
+import { getCached, getOrFetchCached, setCache } from "./mcp-cache";
 import { callTool, extractData, initSession } from "./mcp-client";
 import type { CPIDataPoint, GDPDataPoint, IIPDataPoint, SummaryStats, WPIDataPoint } from "./types";
 
@@ -36,16 +36,17 @@ interface CPIRow {
 interface WPIRow {
   year: number;
   month: string;
-  majorgroup: string;
+  major_group: string;
   group: string | null;
-  subgroup: string | null;
-  sub_subgroup: string | null;
+  sub_group: string | null;
+  sub_sub_group: string | null;
   item: string | null;
   index_value: string;
 }
 
 interface IIPRow {
-  year: string;
+  year: string | number;
+  month?: string;
   type: string;
   category: string;
   sub_category: string;
@@ -96,25 +97,192 @@ function computeTrend(values: number[]): "up" | "down" | "stable" {
   return "stable";
 }
 
+function getTotalPages(result: Awaited<ReturnType<typeof callTool>>): number {
+  const metadata = result.structuredContent?.meta_data;
+  if (!metadata || typeof metadata !== "object" || !("totalPages" in metadata)) {
+    return 1;
+  }
+
+  const totalPages = metadata.totalPages;
+  if (typeof totalPages !== "number" || !Number.isInteger(totalPages) || totalPages < 0) {
+    throw new Error("MoSPI returned invalid pagination metadata");
+  }
+
+  return totalPages;
+}
+
+
+// --------------------------------------------------
+// RATE LIMIT HANDLING AND PAGINATION
+// --------------------------------------------------
+
+const delay = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Fetch one page with automatic retry for HTTP 429.
+ */
+async function fetchPageWithRetry<T>(
+  sessionId: string,
+  dataset: string,
+  filters: Record<string, string>,
+  page: number,
+  requestId: number
+): Promise<T[]> {
+  const maxRetries = 5;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const result = await callTool(
+        sessionId,
+        {
+          name: "get_data",
+          arguments: {
+            dataset,
+            filters: {
+              ...filters,
+              page: String(page),
+            },
+          },
+        },
+        requestId
+      );
+
+      const rows = extractData<T[]>(result);
+
+      if (!Array.isArray(rows)) {
+        throw new Error(
+          `MoSPI returned non-array data for ${dataset}, page ${page}`
+        );
+      }
+
+      return rows;
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      const isRateLimit =
+        /429|too many requests|rate.?limit/i.test(message);
+
+      if (!isRateLimit || attempt === maxRetries) {
+        throw error;
+      }
+
+      const waitTime = 1000 * Math.pow(2, attempt);
+
+      console.warn(
+        `[MoSPI] Rate limit encountered for ${dataset}, page ${page}.`
+      );
+
+      console.warn(
+        `[MoSPI] Retry ${attempt + 1}/${maxRetries} after ${waitTime}ms`
+      );
+
+      await delay(waitTime);
+    }
+  }
+
+  throw new Error(`Failed to fetch ${dataset}, page ${page}`);
+}
+
+/**
+ * Fetch all pages sequentially.
+ * Avoids sending dozens of simultaneous requests to MoSPI.
+ */
+async function fetchAllPages<T>(
+  sessionId: string,
+  dataset: string,
+  filters: Record<string, string>,
+  requestId: number
+): Promise<T[]> {
+  console.log(`[MoSPI] Starting ${dataset} data fetch...`);
+
+  // Fetch first page.
+  const firstResult = await callTool(
+    sessionId,
+    {
+      name: "get_data",
+      arguments: {
+        dataset,
+        filters: {
+          ...filters,
+          page: "1",
+        },
+      },
+    },
+    requestId
+  );
+
+  const firstPage = extractData<T[]>(firstResult);
+
+  if (!Array.isArray(firstPage)) {
+    throw new Error(`MoSPI returned non-array data for ${dataset}`);
+  }
+
+  // Get pagination information.
+  const totalPages = getTotalPages(firstResult);
+
+  console.log(
+    `[MoSPI] ${dataset}: ${totalPages} total pages found.`
+  );
+
+  const allRows: T[] = [...firstPage];
+
+  if (totalPages <= 1) {
+    console.log(
+      `[MoSPI] ${dataset}: ${allRows.length} records fetched.`
+    );
+
+    return allRows;
+  }
+
+  // Fetch remaining pages sequentially.
+  for (let page = 2; page <= totalPages; page++) {
+    await delay(1000);
+
+    const rows = await fetchPageWithRetry<T>(
+      sessionId,
+      dataset,
+      filters,
+      page,
+      requestId + page
+    );
+
+    allRows.push(...rows);
+
+    console.log(
+      `[MoSPI] ${dataset}: page ${page}/${totalPages} completed. ` +
+      `Total records: ${allRows.length}`
+    );
+  }
+
+  console.log(
+    `[MoSPI] ${dataset}: completed successfully. ` +
+    `${allRows.length} records fetched.`
+  );
+
+  return allRows;
+}
+
 // --- GDP Fetcher ---
 
-export async function fetchGDPData(): Promise<GDPDataPoint[]> {
+async function fetchGDPDataImpl(): Promise<GDPDataPoint[]> {
   const cached = getCached<GDPDataPoint[]>("gdp");
   if (cached) return cached;
 
   const sessionId = await initSession();
 
   // Step 1: know about API (required by protocol)
-  await callTool(sessionId, { name: "1_know_about_mospi_api", arguments: {} }, 2);
+  await callTool(sessionId, { name: "list_datasets", arguments: {} }, 2);
 
   // Step 2: get indicators
-  await callTool(sessionId, { name: "2_get_indicators", arguments: { dataset: "NAS" } }, 3);
+  await callTool(sessionId, { name: "get_indicators", arguments: { dataset: "NAS" } }, 3);
 
   // Step 3: get metadata for GDP Growth Rate quarterly
   await callTool(
     sessionId,
     {
-      name: "3_get_metadata",
+      name: "get_metadata",
       arguments: { dataset: "NAS", indicator_code: "22", frequency_code: "2" },
     },
     4
@@ -128,10 +296,11 @@ export async function fetchGDPData(): Promise<GDPDataPoint[]> {
     callTool(
       sessionId,
       {
-        name: "4_get_data",
+        name: "get_data",
         arguments: {
           dataset: "NAS",
           filters: {
+            base_year: "2011-12",
             series: "Current",
             frequency_code: "Quarterly",
             indicator_code: "22",
@@ -147,10 +316,11 @@ export async function fetchGDPData(): Promise<GDPDataPoint[]> {
     callTool(
       sessionId,
       {
-        name: "4_get_data",
+        name: "get_data",
         arguments: {
           dataset: "NAS",
           filters: {
+            base_year: "2011-12",
             series: "Current",
             frequency_code: "Quarterly",
             indicator_code: "21",
@@ -166,10 +336,11 @@ export async function fetchGDPData(): Promise<GDPDataPoint[]> {
     callTool(
       sessionId,
       {
-        name: "4_get_data",
+        name: "get_data",
         arguments: {
           dataset: "NAS",
           filters: {
+            base_year: "2011-12",
             series: "Current",
             frequency_code: "Quarterly",
             indicator_code: "5",
@@ -258,20 +429,24 @@ export async function fetchGDPData(): Promise<GDPDataPoint[]> {
   return result;
 }
 
+export function fetchGDPData(): Promise<GDPDataPoint[]> {
+  return getOrFetchCached("gdp", fetchGDPDataImpl);
+}
+
 // --- CPI Fetcher ---
 
-export async function fetchCPIData(): Promise<CPIDataPoint[]> {
+async function fetchCPIDataImpl(): Promise<CPIDataPoint[]> {
   const cached = getCached<CPIDataPoint[]>("cpi");
   if (cached) return cached;
 
   const sessionId = await initSession();
 
-  await callTool(sessionId, { name: "1_know_about_mospi_api", arguments: {} }, 2);
-  await callTool(sessionId, { name: "2_get_indicators", arguments: { dataset: "CPI" } }, 3);
+  await callTool(sessionId, { name: "list_datasets", arguments: {} }, 2);
+  await callTool(sessionId, { name: "get_indicators", arguments: { dataset: "CPI" } }, 3);
   await callTool(
     sessionId,
     {
-      name: "3_get_metadata",
+      name: "get_metadata",
       arguments: { dataset: "CPI", base_year: "2012", level: "Group" },
     },
     4
@@ -279,28 +454,21 @@ export async function fetchCPIData(): Promise<CPIDataPoint[]> {
 
   // Fetch CPI data for latest year, All India, Combined sector
   // Groups: 0=General, 1=Food and Beverages, 3=Clothing and Footwear, 4=Housing, 5=Fuel and Light
-  const result = await callTool(
+  const rows = await fetchAllPages<CPIRow>(
     sessionId,
+    "CPI",
     {
-      name: "4_get_data",
-      arguments: {
-        dataset: "CPI",
-        filters: {
-          base_year: "2012",
-          series: "Current",
-          year: "2024",
-          state_code: "99",
-          sector_code: "3",
-          group_code: "0,1,3,4,5",
-          Format: "JSON",
-          limit: "500",
-        },
-      },
+      base_year: "2012",
+      series: "Current",
+      year: "2024",
+      state_code: "99",
+      sector_code: "3",
+      group_code: "0,1,3,4,5",
+      limit: "100",
+      Format: "JSON",
     },
     5
   );
-
-  const rows = extractData<CPIRow[]>(result);
 
   // Filter to "Overall" subgroups only and build per-month data
   const monthData = new Map<
@@ -341,6 +509,11 @@ export async function fetchCPIData(): Promise<CPIDataPoint[]> {
       row.subgroup === "Food and Beverages-Overall"
     ) {
       entry.food = idx;
+    } else if (
+      row.group === "Consumer Food Price" &&
+      row.subgroup === "Consumer Food Price-Overall"
+    ) {
+      entry.food = idx;
     } else if (row.group === "Fuel and Light" && row.subgroup === "Fuel and Light-Overall") {
       entry.fuel = idx;
     } else if (row.group === "Housing" && row.subgroup === "Housing-Overall") {
@@ -373,41 +546,41 @@ export async function fetchCPIData(): Promise<CPIDataPoint[]> {
   return cpiResult;
 }
 
+export function fetchCPIData(): Promise<CPIDataPoint[]> {
+  return getOrFetchCached("cpi", fetchCPIDataImpl);
+}
+
 // --- WPI Fetcher ---
 
-export async function fetchWPIData(): Promise<WPIDataPoint[]> {
+async function fetchWPIDataImpl(): Promise<WPIDataPoint[]> {
   const cached = getCached<WPIDataPoint[]>("wpi");
   if (cached) return cached;
 
   const sessionId = await initSession();
 
-  await callTool(sessionId, { name: "1_know_about_mospi_api", arguments: {} }, 2);
-  await callTool(sessionId, { name: "2_get_indicators", arguments: { dataset: "WPI" } }, 3);
-  await callTool(sessionId, { name: "3_get_metadata", arguments: { dataset: "WPI" } }, 4);
+  await callTool(sessionId, { name: "list_datasets", arguments: {} }, 2);
+  await callTool(sessionId, { name: "get_indicators", arguments: { dataset: "WPI" } }, 3);
+  await callTool(sessionId, { name: "get_metadata", arguments: { dataset: "WPI" } }, 4);
 
   // Fetch all major groups for latest year
   // major_group_codes: 1000000000=WPI All, 1100000000=Primary, 1200000000=Fuel, 1300000000=Manufactured
-  const result = await callTool(
+  const rows = await fetchAllPages<WPIRow>(
     sessionId,
+    "WPI",
     {
-      name: "4_get_data",
-      arguments: {
-        dataset: "WPI",
-        filters: {
-          year: "2024",
-          major_group_code: "1000000000,1100000000,1200000000,1300000000",
-          Format: "JSON",
-          limit: "500",
-        },
-      },
+      base_year: "2022-23",
+      year: "2024",
+      major_group_code: "1000000000,1100000000,1200000000,1300000000",
+      limit: "100",
+      Format: "JSON",
     },
     5
   );
 
-  const rows = extractData<WPIRow[]>(result);
-
   // Filter to major-group level only (no group/subgroup/item)
-  const majorGroupRows = rows.filter((r) => !r.group && !r.subgroup && !r.sub_subgroup && !r.item);
+  const majorGroupRows = rows.filter(
+    (r) => !r.group && !r.sub_group && !r.sub_sub_group && !r.item
+  );
 
   // Build per-month data
   const monthData = new Map<
@@ -424,43 +597,38 @@ export async function fetchWPIData(): Promise<WPIDataPoint[]> {
     if (!entry) continue;
 
     const val = Number.parseFloat(row.index_value);
-    if (row.majorgroup === "Wholesale Price Index") {
+    if (row.major_group === "Wholesale Price Index") {
       entry.all = val;
-    } else if (row.majorgroup === "Primary articles") {
+    } else if (row.major_group === "Primary Articles") {
       entry.primary = val;
-    } else if (row.majorgroup === "Fuel & power") {
+    } else if (row.major_group === "Fuel & Power") {
       entry.fuel = val;
-    } else if (row.majorgroup === "Manufactured products") {
+    } else if (row.major_group === "Manufactured Products") {
       entry.manufactured = val;
     }
   }
 
   // To compute WPI inflation (YoY), we also need previous year data
-  const prevResult = await callTool(
+  const prevRows = await fetchAllPages<WPIRow>(
     sessionId,
+    "WPI",
     {
-      name: "4_get_data",
-      arguments: {
-        dataset: "WPI",
-        filters: {
-          year: "2023",
-          major_group_code: "1000000000",
-          Format: "JSON",
-          limit: "500",
-        },
-      },
+      base_year: "2022-23",
+      year: "2023",
+      major_group_code: "1000000000",
+      limit: "100",
+      Format: "JSON",
     },
-    6
+    30
   );
 
-  const prevRows = extractData<WPIRow[]>(prevResult);
   const prevAllByMonth = new Map<string, number>();
   for (const row of prevRows.filter(
     (r) =>
-      r.majorgroup === "Wholesale Price Index" &&
+      r.major_group === "Wholesale Price Index" &&
       !r.group &&
-      !r.subgroup &&
-      !r.sub_subgroup &&
+      !r.sub_group &&
+      !r.sub_sub_group &&
       !r.item
   )) {
     prevAllByMonth.set(row.month, Number.parseFloat(row.index_value));
@@ -490,156 +658,138 @@ export async function fetchWPIData(): Promise<WPIDataPoint[]> {
   return wpiResult;
 }
 
+export function fetchWPIData(): Promise<WPIDataPoint[]> {
+  return getOrFetchCached("wpi", fetchWPIDataImpl);
+}
+
 // --- IIP Fetcher ---
 
-export async function fetchIIPData(): Promise<IIPDataPoint[]> {
+async function fetchIIPDataImpl(): Promise<IIPDataPoint[]> {
   const cached = getCached<IIPDataPoint[]>("iip");
   if (cached) return cached;
 
   const sessionId = await initSession();
 
-  await callTool(sessionId, { name: "1_know_about_mospi_api", arguments: {} }, 2);
-  await callTool(sessionId, { name: "2_get_indicators", arguments: { dataset: "IIP" } }, 3);
+  await callTool(sessionId, { name: "list_datasets", arguments: {} }, 2);
+  await callTool(sessionId, { name: "get_indicators", arguments: { dataset: "IIP" } }, 3);
   await callTool(
     sessionId,
     {
-      name: "3_get_metadata",
+      name: "get_metadata",
       arguments: { dataset: "IIP", base_year: "2011-12", frequency: "Monthly" },
     },
     4
   );
 
-  // IIP uses financial_year, category_code: 1=Mining, 2=Manufacturing, 3=Electricity, 4=General
-  // Fetch monthly data for latest two financial years
-  const [currentResult, prevResult] = await Promise.all([
-    callTool(
+  // IIP uses month_code with calendar year (1=January, 12=December).
+  const fiscalMonths = [
+    { year: "2024", monthCode: "4", month: "April", label: "Apr" },
+    { year: "2024", monthCode: "5", month: "May", label: "May" },
+    { year: "2024", monthCode: "6", month: "June", label: "Jun" },
+    { year: "2024", monthCode: "7", month: "July", label: "Jul" },
+    { year: "2024", monthCode: "8", month: "August", label: "Aug" },
+    { year: "2024", monthCode: "9", month: "September", label: "Sep" },
+    { year: "2024", monthCode: "10", month: "October", label: "Oct" },
+    { year: "2024", monthCode: "11", month: "November", label: "Nov" },
+    { year: "2024", monthCode: "12", month: "December", label: "Dec" },
+    { year: "2025", monthCode: "1", month: "January", label: "Jan" },
+    { year: "2025", monthCode: "2", month: "February", label: "Feb" },
+    { year: "2025", monthCode: "3", month: "March", label: "Mar" },
+  ];
+
+  const [rows2024, rows2025] = await Promise.all([
+    fetchAllPages<IIPRow>(
       sessionId,
+      "IIP",
       {
-        name: "4_get_data",
-        arguments: {
-          dataset: "IIP",
-          filters: {
-            base_year: "2011-12",
-            type: "All",
-            category_code: "1,2,3,4",
-            financial_year: "2024-25",
-            Format: "JSON",
-            limit: "500",
-          },
-        },
+        base_year: "2011-12",
+        frequency: "Monthly",
+        type: "All",
+        category_code: "1,2,3,4",
+        year: "2024",
+        month_code: "4,5,6,7,8,9,10,11,12",
+        limit: "100",
+        Format: "JSON",
       },
       5
     ),
-    callTool(
+    fetchAllPages<IIPRow>(
       sessionId,
+      "IIP",
       {
-        name: "4_get_data",
-        arguments: {
-          dataset: "IIP",
-          filters: {
-            base_year: "2011-12",
-            type: "All",
-            category_code: "1,2,3,4",
-            financial_year: "2023-24",
-            Format: "JSON",
-            limit: "500",
-          },
-        },
+        base_year: "2011-12",
+        frequency: "Monthly",
+        type: "All",
+        category_code: "1,2,3,4",
+        year: "2025",
+        month_code: "1,2,3",
+        limit: "100",
+        Format: "JSON",
       },
-      6
+      15
     ),
   ]);
+  const monthlyRows = [...rows2024, ...rows2025];
+  const monthlyIIP: IIPDataPoint[] = [];
 
-  const currentRows = extractData<IIPRow[]>(currentResult);
-  const prevRows = extractData<IIPRow[]>(prevResult);
-
-  // IIP annual data returns one row per category (no month field).
-  // We need monthly data - but the API returned annual aggregates.
-  // The monthly IIP data is available per-month via month_code filter.
-  // Let's fetch monthly data with month_code.
-
-  // Check if monthly data is available by looking at the data shape
-  const hasMonthlyData =
-    "month" in (currentRows[0] ?? {}) || "month_code" in (currentRows[0] ?? {});
-
-  if (!hasMonthlyData) {
-    // Annual data only - fetch month by month for current FY
-    // IIP monthly data for 2024-25: April 2024 to latest available
-    const monthlyResults = await Promise.all(
-      Array.from({ length: 12 }, (_, i) =>
-        callTool(
-          sessionId,
-          {
-            name: "4_get_data",
-            arguments: {
-              dataset: "IIP",
-              filters: {
-                base_year: "2011-12",
-                type: "All",
-                category_code: "1,2,3,4",
-                financial_year: "2024-25",
-                month_code: String(i + 1),
-                Format: "JSON",
-                limit: "50",
-              },
-            },
-          },
-          10 + i
-        ).catch(() => null)
-      )
+  for (const month of fiscalMonths) {
+    const topLevel = monthlyRows.filter(
+      (row) =>
+        String(row.year) === month.year && row.month === month.month && row.sub_category === ""
     );
+    const general = topLevel.find((row) => row.category === "General");
+    const mining = topLevel.find((row) => row.category === "Mining");
+    const mfg = topLevel.find((row) => row.category === "Manufacturing");
+    const elec = topLevel.find((row) => row.category === "Electricity");
 
-    const monthlyIIP: IIPDataPoint[] = [];
-    const monthNames = [
-      "Apr",
-      "May",
-      "Jun",
-      "Jul",
-      "Aug",
-      "Sep",
-      "Oct",
-      "Nov",
-      "Dec",
-      "Jan",
-      "Feb",
-      "Mar",
-    ];
-
-    for (let i = 0; i < monthlyResults.length; i++) {
-      const res = monthlyResults[i];
-      if (!res) continue;
-
-      try {
-        const rows = extractData<IIPRow[]>(res);
-        // Filter to top-level categories only (no sub_category)
-        const topLevel = rows.filter((r) => r.sub_category === "");
-
-        const general = topLevel.find((r) => r.category === "General");
-        const mining = topLevel.find((r) => r.category === "Mining");
-        const mfg = topLevel.find((r) => r.category === "Manufacturing");
-        const elec = topLevel.find((r) => r.category === "Electricity");
-
-        if (general) {
-          monthlyIIP.push({
-            month: monthNames[i],
-            year: "2024-25",
-            iipGeneral: Number.parseFloat(general.index),
-            iipMining: mining ? Number.parseFloat(mining.index) : 0,
-            iipManufacturing: mfg ? Number.parseFloat(mfg.index) : 0,
-            iipElectricity: elec ? Number.parseFloat(elec.index) : 0,
-            growthRate: Number.parseFloat(general.growth_rate),
-          });
-        }
-      } catch {
-        // Month not available yet
-      }
-    }
-
-    if (monthlyIIP.length > 0) {
-      setCache("iip", monthlyIIP);
-      return monthlyIIP;
+    if (general) {
+      monthlyIIP.push({
+        month: month.label,
+        year: "2024-25",
+        iipGeneral: Number.parseFloat(general.index),
+        iipMining: mining ? Number.parseFloat(mining.index) : 0,
+        iipManufacturing: mfg ? Number.parseFloat(mfg.index) : 0,
+        iipElectricity: elec ? Number.parseFloat(elec.index) : 0,
+        growthRate: Number.parseFloat(general.growth_rate),
+      });
     }
   }
+
+  if (monthlyIIP.length > 0) {
+    setCache("iip", monthlyIIP);
+    return monthlyIIP;
+  }
+
+  const [currentRows, prevRows] = await Promise.all([
+    fetchAllPages<IIPRow>(
+      sessionId,
+      "IIP",
+      {
+        base_year: "2011-12",
+        frequency: "Annually",
+        type: "All",
+        category_code: "1,2,3,4",
+        financial_year: "2024-25",
+        limit: "100",
+        Format: "JSON",
+      },
+      100
+    ),
+    fetchAllPages<IIPRow>(
+      sessionId,
+      "IIP",
+      {
+        base_year: "2011-12",
+        frequency: "Annually",
+        type: "All",
+        category_code: "1,2,3,4",
+        financial_year: "2023-24",
+        limit: "100",
+        Format: "JSON",
+      },
+      110
+    ),
+  ]);
 
   // Fallback: use annual data, create a single-point per financial year
   const buildFromAnnual = (rows: IIPRow[], year: string): IIPDataPoint | null => {
@@ -669,6 +819,10 @@ export async function fetchIIPData(): Promise<IIPDataPoint[]> {
 
   setCache("iip", iipResult);
   return iipResult;
+}
+
+export function fetchIIPData(): Promise<IIPDataPoint[]> {
+  return getOrFetchCached("iip", fetchIIPDataImpl);
 }
 
 // --- Summary Stats ---

@@ -1,4 +1,5 @@
 const MCP_URL = "https://mcp.mospi.gov.in/";
+const PROTOCOL_VERSION = "2025-03-26";
 
 interface MCPToolCallParams {
   name: string;
@@ -7,69 +8,152 @@ interface MCPToolCallParams {
 
 interface MCPResult {
   structuredContent?: Record<string, unknown>;
-  content?: Array<{ type: string; text: string }>;
+  content?: Array<{ type: string; text?: string }>;
   isError?: boolean;
 }
 
-function parseSSEResponse(raw: string): MCPResult {
-  const lines = raw.split("\n");
-  for (const line of lines) {
-    if (line.startsWith("data: ")) {
-      const json = JSON.parse(line.slice(6));
-      if (json.result) {
-        return json.result as MCPResult;
-      }
-      if (json.error) {
-        throw new Error(`MCP error: ${json.error.message ?? JSON.stringify(json.error)}`);
-      }
-    }
-  }
-  throw new Error("No valid SSE message found in response");
+interface MCPResponse {
+  result?: Record<string, unknown>;
+  sessionId: string;
 }
 
-async function mcpFetch(
-  body: Record<string, unknown>,
-  sessionId?: string
-): Promise<{ result: MCPResult; sessionId: string }> {
+// Extract MCP responses from SSE format.
+function parseSSEResponse(raw: string): Record<string, unknown> {
+  const blocks = raw.split(/\r?\n\r?\n/);
+  let lastResult: Record<string, unknown> | undefined;
+
+  for (const block of blocks) {
+    const dataLines = block
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trim());
+
+    if (dataLines.length === 0) continue;
+
+    const data = dataLines.join("\n");
+    if (data === "[DONE]") continue;
+
+    const message = JSON.parse(data);
+
+    if (message.error) {
+      throw new Error(`MCP error: ${message.error.message ?? JSON.stringify(message.error)}`);
+    }
+
+    if (message.result) {
+      lastResult = message.result;
+    }
+  }
+
+  if (!lastResult) {
+    throw new Error(`No valid MCP result found in SSE response: ${raw.slice(0, 500)}`);
+  }
+
+  return lastResult;
+}
+
+// Support both JSON and SSE MCP responses.
+function parseMCPResponse(raw: string, contentType: string): Record<string, unknown> {
+  if (contentType.includes("text/event-stream")) {
+    return parseSSEResponse(raw);
+  }
+
+  try {
+    const message = JSON.parse(raw);
+
+    if (message.error) {
+      throw new Error(`MCP error: ${message.error.message ?? JSON.stringify(message.error)}`);
+    }
+
+    return message.result ?? message;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      return parseSSEResponse(raw);
+    }
+    throw error;
+  }
+}
+
+// Send an MCP JSON-RPC request.
+async function mcpFetch(body: Record<string, unknown>, sessionId?: string): Promise<MCPResponse> {
   const headers: Record<string, string> = {
-    Accept: "text/event-stream, application/json",
+    Accept: "application/json, text/event-stream",
     "Content-Type": "application/json",
   };
+
   if (sessionId) {
     headers["mcp-session-id"] = sessionId;
   }
 
-  const res = await fetch(MCP_URL, {
+  if (body.method !== "initialize") {
+    headers["MCP-Protocol-Version"] = PROTOCOL_VERSION;
+  }
+
+  const response = await fetch(MCP_URL, {
     method: "POST",
     headers,
     body: JSON.stringify(body),
+    cache: "no-store",
   });
 
-  if (!res.ok) {
-    throw new Error(`MCP HTTP ${res.status}: ${res.statusText}`);
+  const newSessionId = response.headers.get("mcp-session-id") ?? sessionId ?? "";
+
+  const raw = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`MCP HTTP ${response.status}: ${raw || response.statusText}`);
   }
 
-  const newSessionId = res.headers.get("mcp-session-id") ?? sessionId ?? "";
-  const text = await res.text();
-  const result = parseSSEResponse(text);
+  // MCP notifications normally return HTTP 202 without a response body.
+  if (response.status === 202 || response.status === 204 || !raw.trim()) {
+    return {
+      result: undefined,
+      sessionId: newSessionId,
+    };
+  }
 
-  return { result, sessionId: newSessionId };
+  return {
+    result: parseMCPResponse(raw, response.headers.get("content-type") ?? ""),
+    sessionId: newSessionId,
+  };
 }
 
+// Initialize MCP session.
 export async function initSession(): Promise<string> {
-  const { sessionId } = await mcpFetch({
+  const { result, sessionId } = await mcpFetch({
     jsonrpc: "2.0",
     id: 1,
     method: "initialize",
     params: {
-      protocolVersion: "2024-11-05",
+      protocolVersion: PROTOCOL_VERSION,
       capabilities: {},
-      clientInfo: { name: "india-dashboard", version: "1.0.0" },
+      clientInfo: {
+        name: "india-economic-dashboard",
+        version: "1.0.0",
+      },
     },
   });
+
+  if (!result) {
+    throw new Error("MCP initialization returned an empty response");
+  }
+
+  console.log("MCP initialized:", result.serverInfo ?? result);
+
+  // Complete the MCP initialization handshake.
+  await mcpFetch(
+    {
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    },
+    sessionId
+  );
+
+  console.log("MCP initialization handshake completed");
+
   return sessionId;
 }
 
+// Call an MCP tool.
 export async function callTool(
   sessionId: string,
   params: MCPToolCallParams,
@@ -80,29 +164,63 @@ export async function callTool(
       jsonrpc: "2.0",
       id: requestId,
       method: "tools/call",
-      params: { name: params.name, arguments: params.arguments },
+      params: {
+        name: params.name,
+        arguments: params.arguments,
+      },
     },
     sessionId
   );
 
-  if (result.isError) {
-    const errorText = result.content?.[0]?.text ?? "Unknown MCP tool error";
+  if (!result) {
+    throw new Error(`Empty response from MCP tool: ${params.name}`);
+  }
+
+  const toolResult = result as MCPResult;
+
+  if (toolResult.isError) {
+    const errorText = toolResult.content?.[0]?.text ?? "Unknown MCP tool error";
+
     throw new Error(`MCP tool error (${params.name}): ${errorText}`);
   }
 
-  return result;
+  return toolResult;
 }
 
+// Extract data from MCP tool response.
 export function extractData<T>(result: MCPResult): T {
-  if (result.structuredContent?.data) {
-    return result.structuredContent.data as T;
+  const error = result.structuredContent?.error;
+  if (error !== undefined) {
+    throw new Error(
+      `MoSPI returned an error: ${typeof error === "string" ? error : JSON.stringify(error)}`
+    );
   }
-  if (result.content?.[0]?.text) {
-    const parsed = JSON.parse(result.content[0].text);
-    if (parsed.data) {
-      return parsed.data as T;
+
+  const structuredData = result.structuredContent?.data;
+
+  if (structuredData !== undefined) {
+    return structuredData as T;
+  }
+
+  const text = result.content?.find((item) => item.type === "text" && item.text)?.text;
+
+  if (text) {
+    const parsed = JSON.parse(text);
+
+    if (parsed && typeof parsed === "object") {
+      if ("error" in parsed) {
+        const errorMessage =
+          typeof parsed.error === "string" ? parsed.error : JSON.stringify(parsed.error);
+        throw new Error(`MoSPI returned an error: ${errorMessage}`);
+      }
+
+      if ("data" in parsed) {
+        return parsed.data as T;
+      }
     }
+
     return parsed as T;
   }
+
   throw new Error("No data found in MCP response");
 }
