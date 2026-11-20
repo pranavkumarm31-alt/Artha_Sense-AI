@@ -22,9 +22,11 @@ Filter codes from step 3 must be used exactly in step 4.
 ## Datasets
 
 - **NAS** (GDP): indicator_code 22 (GDP Growth Rate), 21 (GVA Growth Rate), 5 (GDP absolute). Quarterly, fiscal year format "YYYY-YY".
-- **CPI**: base_year "2012", level "Group". Groups: 0=General, 1=Food, 3=Clothing, 4=Housing, 5=Fuel. All India (state_code 99), Combined (sector_code 3).
+- **CPI**: use the current official series with base year "2024"; resolve exact filters from metadata and do not assume the former 2012 series.
 - **WPI**: major_group_code 1000000000 (All), 1100000000 (Primary), 1200000000 (Fuel), 1300000000 (Manufactured). Filter response to major-group level (no group/subgroup/item).
 - **IIP**: base_year "2011-12", financial_year format. category_code 1=Mining, 2=Manufacturing, 3=Electricity, 4=General. Uses `month_code` for monthly data.
+
+An optional Python intelligence service under `python-service/` stores validated official observations in PostgreSQL. It is not required for the Next.js dashboard to fetch and display MoSPI data.
 
 ## Commands
 

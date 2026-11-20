@@ -1,5 +1,6 @@
 const MCP_URL = "https://mcp.mospi.gov.in/";
 const PROTOCOL_VERSION = "2025-03-26";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 interface MCPToolCallParams {
   name: string;
@@ -93,6 +94,7 @@ async function mcpFetch(body: Record<string, unknown>, sessionId?: string): Prom
     headers,
     body: JSON.stringify(body),
     cache: "no-store",
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const newSessionId = response.headers.get("mcp-session-id") ?? sessionId ?? "";

@@ -6,8 +6,8 @@ import type { WPIDataPoint } from "@/lib/types";
 import { motion } from "framer-motion";
 import {
   Bar,
+  BarChart,
   CartesianGrid,
-  ComposedChart,
   Legend,
   Line,
   LineChart,
@@ -25,13 +25,13 @@ export function WPIChart({ data }: WPIChartProps) {
   const { grid, axis, tick, tooltipStyle } = useChartTheme();
 
   const chartData = data.map((d) => ({
-    period: `${d.month}`,
+    period: d.period,
     inflation: d.wpiInflation,
     all: d.wpiAll,
-    primary: d.wpiPrimary,
-    fuel: d.wpiFuel,
-    manufactured: d.wpiManufactured,
   }));
+  const hasInflationData = data.some(
+    (point) => point.wpiInflation !== null && Number.isFinite(point.wpiInflation)
+  );
 
   return (
     <motion.div
@@ -61,7 +61,7 @@ export function WPIChart({ data }: WPIChartProps) {
             <div>
               <CardTitle>Wholesale Price Index (WPI)</CardTitle>
               <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                Monthly WPI inflation and index by commodity group (Base: 2011-12=100)
+                Monthly overall WPI and year-on-year inflation (Base: 2022-23=100)
               </p>
             </div>
           </div>
@@ -71,67 +71,72 @@ export function WPIChart({ data }: WPIChartProps) {
             <h4 className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-3 uppercase tracking-wider">
               WPI Inflation Rate (%)
             </h4>
-            <ResponsiveContainer width="100%" height="100%">
-              <ComposedChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="wpiBarGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.7} />
-                    <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.3} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke={grid}
-                  strokeOpacity={0.5}
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="period"
-                  tick={{ fontSize: 11, fill: tick }}
-                  tickLine={false}
-                  axisLine={{ stroke: axis, strokeWidth: 1 }}
-                  dy={8}
-                />
-                <YAxis
-                  tick={{ fontSize: 11, fill: tick }}
-                  tickLine={false}
-                  axisLine={false}
-                  unit="%"
-                  domain={[-1, 5]}
-                  width={45}
-                />
-                <Tooltip
-                  contentStyle={tooltipStyle}
-                  formatter={(value: number) => [`${value.toFixed(2)}%`]}
-                />
-                <Legend
-                  iconType="circle"
-                  iconSize={8}
-                  wrapperStyle={{ fontSize: "12px", paddingTop: "12px" }}
-                />
-                <Bar
-                  dataKey="inflation"
-                  name="WPI Inflation"
-                  fill="url(#wpiBarGradient)"
-                  radius={[6, 6, 0, 0]}
-                  barSize={24}
-                />
-                <Line
-                  type="monotone"
-                  dataKey="inflation"
-                  name="Trend"
-                  stroke="#1d4ed8"
-                  strokeWidth={2}
-                  dot={false}
-                  strokeDasharray="4 4"
-                />
-              </ComposedChart>
-            </ResponsiveContainer>
+            {hasInflationData ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 10, right: 10, left: -10, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="wpiBarGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.7} />
+                      <stop offset="100%" stopColor="#3b82f6" stopOpacity={0.3} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    stroke={grid}
+                    strokeOpacity={0.5}
+                    vertical={false}
+                  />
+                  <XAxis
+                    dataKey="period"
+                    tick={{ fontSize: 11, fill: tick }}
+                    tickLine={false}
+                    axisLine={{ stroke: axis, strokeWidth: 1 }}
+                    dy={8}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 11, fill: tick }}
+                    tickLine={false}
+                    axisLine={false}
+                    unit="%"
+                    domain={["auto", "auto"]}
+                    width={45}
+                  />
+                  <Tooltip
+                    contentStyle={tooltipStyle}
+                    formatter={(value) => [
+                      typeof value === "number" ? `${value.toFixed(2)}%` : "N/A",
+                    ]}
+                  />
+                  <Legend
+                    iconType="circle"
+                    iconSize={8}
+                    wrapperStyle={{ fontSize: "12px", paddingTop: "12px" }}
+                  />
+                  <Bar
+                    dataKey="inflation"
+                    name="WPI Inflation"
+                    fill="url(#wpiBarGradient)"
+                    radius={[6, 6, 0, 0]}
+                    barSize={24}
+                  />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <p className="pt-8 text-sm text-slate-500 dark:text-slate-400">
+                Year-on-year inflation is unavailable because matching prior-year index observations
+                were not returned.
+              </p>
+            )}
+            {hasInflationData && (
+              <p className="mt-2 text-[11px] text-slate-500 dark:text-slate-400">
+                Calculated from the same month one year earlier; months without a match are omitted.
+              </p>
+            )}
           </div>
 
           <div className="mt-8 pt-6 border-t border-slate-200/60 dark:border-slate-700/30">
             <h4 className="text-xs font-medium text-slate-500 dark:text-slate-400 mb-3 uppercase tracking-wider">
-              WPI by Commodity Group
+              Overall WPI Index (2022-23=100)
             </h4>
             <div className="h-56">
               <ResponsiveContainer width="100%" height="100%">
@@ -158,7 +163,7 @@ export function WPIChart({ data }: WPIChartProps) {
                   />
                   <Tooltip
                     contentStyle={tooltipStyle}
-                    formatter={(value: number) => [value.toFixed(1)]}
+                    formatter={(value) => [typeof value === "number" ? value.toFixed(1) : "N/A"]}
                   />
                   <Legend
                     iconType="circle"
@@ -170,30 +175,6 @@ export function WPIChart({ data }: WPIChartProps) {
                     dataKey="all"
                     name="All Commodities"
                     stroke="#6366f1"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="primary"
-                    name="Primary Articles"
-                    stroke="#22c55e"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="fuel"
-                    name="Fuel & Power"
-                    stroke="#f59e0b"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="manufactured"
-                    name="Manufactured"
-                    stroke="#ec4899"
                     strokeWidth={2}
                     dot={false}
                   />

@@ -30,7 +30,7 @@ export function IIPChart({ data }: IIPChartProps) {
   const { grid, axis, tick, tooltipStyle, isDark } = useChartTheme();
 
   const chartData = data.map((d) => ({
-    period: `${d.month}`,
+    period: d.period,
     growth: d.growthRate,
     general: d.iipGeneral,
     mining: d.iipMining,
@@ -39,12 +39,23 @@ export function IIPChart({ data }: IIPChartProps) {
   }));
 
   const latestData = data[data.length - 1];
-  const radarData = [
-    { sector: "General", value: latestData.iipGeneral, fullMark: 200 },
-    { sector: "Mining", value: latestData.iipMining, fullMark: 200 },
-    { sector: "Mfg", value: latestData.iipManufacturing, fullMark: 200 },
-    { sector: "Electricity", value: latestData.iipElectricity, fullMark: 200 },
-  ];
+  const latestIndices = latestData
+    ? [
+        latestData.iipGeneral,
+        latestData.iipMining,
+        latestData.iipManufacturing,
+        latestData.iipElectricity,
+      ].filter((value): value is number => value !== null && Number.isFinite(value))
+    : [];
+  const radarMax = Math.max(200, Math.ceil(Math.max(0, ...latestIndices) / 20) * 20);
+  const radarData = latestData
+    ? [
+        { sector: "General", value: latestData.iipGeneral, fullMark: radarMax },
+        { sector: "Mining", value: latestData.iipMining, fullMark: radarMax },
+        { sector: "Mfg", value: latestData.iipManufacturing, fullMark: radarMax },
+        { sector: "Electricity", value: latestData.iipElectricity, fullMark: radarMax },
+      ]
+    : [];
 
   return (
     <motion.div
@@ -113,12 +124,14 @@ export function IIPChart({ data }: IIPChartProps) {
                     tickLine={false}
                     axisLine={false}
                     unit="%"
-                    domain={[0, 8]}
+                    domain={["auto", "auto"]}
                     width={45}
                   />
                   <Tooltip
                     contentStyle={tooltipStyle}
-                    formatter={(value: number) => [`${value.toFixed(1)}%`]}
+                    formatter={(value) => [
+                      typeof value === "number" ? `${value.toFixed(1)}%` : "N/A",
+                    ]}
                   />
                   <Area
                     type="monotone"
@@ -145,7 +158,7 @@ export function IIPChart({ data }: IIPChartProps) {
                   <PolarAngleAxis dataKey="sector" tick={{ fontSize: 10, fill: tick }} />
                   <PolarRadiusAxis
                     angle={30}
-                    domain={[0, 200]}
+                    domain={[0, radarMax]}
                     tick={{ fontSize: 9, fill: tick }}
                     axisLine={false}
                   />
@@ -191,7 +204,7 @@ export function IIPChart({ data }: IIPChartProps) {
                   />
                   <Tooltip
                     contentStyle={tooltipStyle}
-                    formatter={(value: number) => [value.toFixed(1)]}
+                    formatter={(value) => [typeof value === "number" ? value.toFixed(1) : "N/A"]}
                   />
                   <Legend
                     iconType="circle"
